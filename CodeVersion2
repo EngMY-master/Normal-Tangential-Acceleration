@@ -1,0 +1,354 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import sympy as sp
+import math
+import traceback
+from sympy.parsing.sympy_parser import (
+    parse_expr,
+    standard_transformations,
+    implicit_multiplication_application
+)
+
+TRANSFORMATIONS = standard_transformations + (implicit_multiplication_application,)
+
+# Symbolic variables for position/time
+Xsym = sp.Symbol('Xsym', real=True)
+Tsym = sp.Symbol('t', real=True)
+
+def safe_parse_expr(expr_str, debug=False):
+    """Parse a string into a Sympy expression, mapping 'Xsym' and 't' properly."""
+    if not expr_str or not expr_str.strip():
+        return None
+    try:
+        local_dict = {"Xsym": Xsym, "t": Tsym}
+        parsed = parse_expr(expr_str, local_dict=local_dict, transformations=TRANSFORMATIONS)
+        if debug:
+            print(f"[DEBUG] parse_expr => '{expr_str}' => {parsed}")
+        return parsed
+    except Exception as e:
+        if debug:
+            print("[DEBUG] parse_expr exception:")
+            traceback.print_exc()
+        return None
+
+def compute_radius_of_curvature(y_expr, x_val, debug=False):
+    """
+    rho = [1 + (dy/dXsym)^2]^(3/2) / |d^2y/dXsym^2|
+    Evaluate at X_val.
+    """
+    if debug:
+        print(f"[DEBUG] compute_radius_of_curvature: y_expr={y_expr}, X_val={x_val}")
+    try:
+        dy_dX = sp.diff(y_expr, Xsym)
+        d2y_dX2 = sp.diff(dy_dX, Xsym)
+
+        if debug:
+            print(f"[DEBUG]   dy_dX  = {dy_dX}")
+            print(f"[DEBUG]   d2y_dX2= {d2y_dX2}")
+
+        slope_val = dy_dX.subs(Xsym, x_val)
+        second_val = d2y_dX2.subs(Xsym, x_val)
+
+        # Curvature formula
+        rho_expr = ((1 + (dy_dX)**2)**(sp.Rational(3,2))) / sp.Abs(d2y_dX2)
+        rho_val_sym = rho_expr.subs(Xsym, x_val)
+        rho_val = float(rho_val_sym)
+
+        if debug:
+            print(f"[DEBUG]   slope_val={slope_val}, second_val={second_val}, rho_val={rho_val}")
+        return rho_val
+    except Exception as e:
+        if debug:
+            print("[DEBUG] compute_radius_of_curvature exception:")
+            traceback.print_exc()
+        return None
+
+def evaluate_function(expr_str, var_name, var_val, debug=False):
+    """
+    Evaluate 'expr_str' at var_name=var_val, e.g. 'Xsym' or 't'.
+    Returns float or None on error.
+    """
+    if expr_str is None or var_val is None:
+        return None
+    parsed_expr = safe_parse_expr(expr_str, debug=debug)
+    if parsed_expr is None:
+        return None
+
+    symbol_to_sub = Xsym if var_name == 'Xsym' else Tsym
+    try:
+        evaluated = parsed_expr.subs(symbol_to_sub, var_val)
+        val = float(evaluated)
+        if debug:
+            print(f"[DEBUG] evaluate_function '{expr_str}' at {var_name}={var_val} => {val}")
+        return val
+    except Exception as e:
+        if debug:
+            print("[DEBUG] evaluate_function exception:")
+            traceback.print_exc()
+        return None
+
+def analyze_data(data, debug=False):
+    """
+    Normal–tangential solver that tries to fill a_n, a_t, a_total, angle_a,
+    time_needed, v, etc. from known data.
+    Extended logic:
+      if a_total, a_t, and rho => we can find a_n= sqrt(a_total^2 - a_t^2)
+      then find v= sqrt(a_n*rho).
+      if calc_time_needed => time= (v - v0)/a_t
+    """
+
+    if debug:
+        print("\n[DEBUG] analyze_data: initial data:")
+        for k,v in data.items():
+            print(f"   {k} = {v}")
+
+    # Extract user data
+    path_str       = data.get("path_str", None)
+    x_val          = data.get("x_val", None)
+    rho_user       = data.get("rho", None)
+    v_num          = data.get("v", None)
+    v0_num         = data.get("v0", None)
+    a_n            = data.get("a_n", None)
+    time_val       = data.get("time", None)
+    a_total        = data.get("a_total", None)
+    angle_a        = data.get("angle_a", None)
+    speed_const    = data.get("speed_constant", False)
+    calc_time_need = data.get("calc_time_needed", False)
+
+    # Tangential acceleration
+    a_t_num = data.get("a_t", None)
+    a_t_str = data.get("a_t_function", None)
+
+    # Velocity function
+    v_func_t = data.get("v_function_time", None)
+    v_func_x = data.get("v_function_pos", None)
+
+    # Parse path if provided
+    y_expr = None
+    if path_str:
+        y_expr = safe_parse_expr(path_str, debug=debug)
+        if debug and y_expr:
+            print(f"[DEBUG] path y_expr = {y_expr}")
+
+    # If no rho but path + x_val => compute curvature
+    if rho_user is None and y_expr is not None and x_val is not None:
+        computed_rho = compute_radius_of_curvature(y_expr, x_val, debug=debug)
+        data["rho"] = computed_rho
+        rho_user = computed_rho
+
+    # If speed constant => a_t=0
+    if speed_const:
+        data["a_t"] = 0.0
+        a_t_num = 0.0
+        data.pop("a_t_function", None)
+        if debug:
+            print("[DEBUG] Speed constant => a_t=0")
+
+    # Evaluate a_t if user gave a function
+    if a_t_str is not None:
+        if ('t' in a_t_str) and (time_val is not None):
+            val_a_t = evaluate_function(a_t_str, 't', time_val, debug=debug)
+            if val_a_t is not None:
+                data["a_t"] = val_a_t
+                a_t_num = val_a_t
+        elif ('Xsym' in a_t_str) and (x_val is not None):
+            val_a_t = evaluate_function(a_t_str, 'Xsym', x_val, debug=debug)
+            if val_a_t is not None:
+                data["a_t"] = val_a_t
+                a_t_num = val_a_t
+
+    # Evaluate velocity if user gave a function
+    if v_func_t and time_val is not None and v_num is None:
+        v_evaluated = evaluate_function(v_func_t, 't', time_val, debug=debug)
+        if v_evaluated is not None:
+            data["v"] = v_evaluated
+            v_num = v_evaluated
+    if v_func_x and x_val is not None and v_num is None:
+        v_evaluated = evaluate_function(v_func_x, 'Xsym', x_val, debug=debug)
+        if v_evaluated is not None:
+            data["v"] = v_evaluated
+            v_num = v_evaluated
+
+    # 1) If a_n missing but we have v and rho => a_n= v^2/rho
+    rho_val = data.get("rho", None)
+    if a_n is None and (v_num is not None) and (rho_val is not None):
+        data["a_n"] = (v_num**2)/rho_val
+        a_n = data["a_n"]
+        if debug:
+            print(f"[DEBUG] Computed a_n={a_n}")
+
+    # 2) If a_total is not None, a_t_num is not None, but a_n is still None => partial pythag
+    #    => a_n= sqrt(a_total^2 - a_t^2) if feasible
+    if a_total is not None and a_t_num is not None and a_n is None:
+        val = a_total**2 - a_t_num**2
+        if val >= 0:
+            a_n_val = math.sqrt(val)
+            data["a_n"] = a_n_val
+            a_n = a_n_val
+            if debug:
+                print(f"[DEBUG] Found a_n from partial pythag => {a_n_val}")
+
+    # 3) If we now have a_n and rho but no v => v= sqrt(a_n*rho)
+    if a_n is not None and rho_val is not None and v_num is None:
+        if a_n >= 0 and rho_val >= 0:
+            v_calc = math.sqrt(a_n*rho_val)
+            data["v"] = v_calc
+            v_num = v_calc
+            if debug:
+                print(f"[DEBUG] Found v => sqrt(a_n*rho) = {v_calc}")
+
+    # 4) If a_total missing but we have a_t_num and a_n => a_total= sqrt(a_t^2 + a_n^2)
+    if a_total is None:
+        if (a_t_num is not None) and (a_n is not None):
+            new_a_tot = math.sqrt(a_t_num**2 + a_n**2)
+            data["a_total"] = new_a_tot
+            a_total = new_a_tot
+            if debug:
+                print(f"[DEBUG] Computed a_total={new_a_tot}")
+
+    # 5) If angle_a missing but a_t and a_n => angle= atan2(a_n,a_t)
+    if angle_a is None and (a_t_num is not None) and (a_n is not None):
+        angle_deg = math.degrees(math.atan2(a_n, a_t_num))
+        data["angle_a"] = angle_deg
+        angle_a = angle_deg
+        if debug:
+            print(f"[DEBUG] Computed angle_a={angle_deg}")
+
+    # 6) If user wants time => time= (v - v0)/ a_t if a_t!=0
+    if calc_time_need:
+        if (v0_num is not None) and (v_num is not None) and (a_t_num is not None) and (a_t_num!=0):
+            data["time_needed"] = (v_num - v0_num)/a_t_num
+            if debug:
+                print(f"[DEBUG] Computed time_needed={data['time_needed']}")
+
+    if debug:
+        print("\n[DEBUG] analyze_data final results:")
+        for k,v in data.items():
+            print(f"   {k} = {v}")
+
+    return data
+
+
+#####################################
+# The interactive method
+#####################################
+
+def interactive_n_t_solver():
+    """
+    Asks the user for the known data, then
+    tries to solve for all unknown standard n-t quantities
+    (including v, a_n, a_total, angle, time, etc.)
+    """
+
+    print("=== Normal–Tangential Interactive Solver ===")
+    print("Press ENTER if unknown. For expressions in Xsym or t, type e.g. '0.1*Xsym' or '2*t+5'.")
+
+    data = {}
+
+    # path
+    path_in = input("Path y(Xsym) [e.g. 'Xsym**2/20']: ").strip()
+    data["path_str"] = path_in if path_in else None
+
+    # x_val
+    xv = input("x_val (position for curvature) if known: ").strip()
+    if xv:
+        try:
+            data["x_val"] = float(xv)
+        except:
+            pass
+
+    # speed
+    vs = input("Speed v if known (or velocity function if you'd rather): ").strip()
+    if vs:
+        try:
+            data["v"] = float(vs)
+        except ValueError:
+            # interpret as function
+            fx_type = input("Is that a function of time [t] or position [Xsym]? (type 't' or 'x'): ").strip().lower()
+            if fx_type.startswith('t'):
+                data["v_function_time"] = vs
+            else:
+                data["v_function_pos"] = vs
+
+    # v0
+    v0s = input("Initial speed v0 if relevant: ").strip()
+    if v0s:
+        try:
+            data["v0"] = float(v0s)
+        except:
+            pass
+
+    # tangential accel
+    a_t_inp = input("Tangential accel a_t if known (numeric or expression): ").strip()
+    if a_t_inp:
+        try:
+            data["a_t"] = float(a_t_inp)
+        except:
+            data["a_t_function"] = a_t_inp
+
+    # normal accel
+    a_n_inp = input("Normal accel a_n if known: ").strip()
+    if a_n_inp:
+        try:
+            data["a_n"] = float(a_n_inp)
+        except:
+            pass
+
+    # rho
+    rho_inp = input("Radius of curvature rho if known: ").strip()
+    if rho_inp:
+        try:
+            data["rho"] = float(rho_inp)
+        except:
+            pass
+
+    # total accel
+    a_tot_inp = input("Total accel |a| if known: ").strip()
+    if a_tot_inp:
+        try:
+            data["a_total"] = float(a_tot_inp)
+        except:
+            pass
+
+    # angle
+    angle_inp = input("Angle of total accel from tangent (deg) if known: ").strip()
+    if angle_inp:
+        try:
+            data["angle_a"] = float(angle_inp)
+        except:
+            pass
+
+    # time
+    time_inp = input("Time (s) if known: ").strip()
+    if time_inp:
+        try:
+            data["time"] = float(time_inp)
+        except:
+            pass
+
+    # speed const
+    sc = input("Is speed constant (y/n)? ").strip().lower()
+    data["speed_constant"] = sc.startswith('y')
+
+    # calc_time_needed
+    ctn = input("Compute time from v0->v (y/n)? ").strip().lower()
+    data["calc_time_needed"] = ctn.startswith('y')
+
+    print("\n[INFO] Analyzing your data...\n")
+    results = analyze_data(data, debug=True)
+
+    print("\n=== FINAL RESULTS ===")
+    for k in sorted(results.keys()):
+        print(f"{k} = {results[k]}")
+    print("===============")
+    print("If you left some unknown desired quantity, check above to see if it was computed.\n")
+
+############################################
+
+def main():
+    # Just run the interactive version
+    interactive_n_t_solver()
+
+if __name__ == "__main__":
+    main()
