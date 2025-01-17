@@ -1,0 +1,395 @@
+# If you're in Colab, just place this entire code in one cell and run.
+
+import sympy as sp
+import math
+import traceback
+
+# For robust expression parsing in Sympy:
+from sympy.parsing.sympy_parser import (
+    parse_expr,
+    standard_transformations,
+    implicit_multiplication_application
+)
+
+TRANSFORMATIONS = standard_transformations + (implicit_multiplication_application,)
+
+# Symbolic variables for position and time
+Xsym = sp.Symbol('Xsym', real=True)
+Tsym = sp.Symbol('t', real=True)
+
+def safe_parse_expr(expr_str, debug=False):
+    """
+    Safely parse a string expression into a Sympy expression,
+    mapping 'Xsym' -> Xsym and 't' -> Tsym.
+    Works well in Colab if typed carefully.
+    """
+    if not expr_str or not expr_str.strip():
+        return None
+    try:
+        local_dict = {"Xsym": Xsym, "t": Tsym}
+        parsed = parse_expr(expr_str, local_dict=local_dict, transformations=TRANSFORMATIONS)
+        if debug:
+            print(f"[DEBUG] parse_expr => '{expr_str}' => {parsed}")
+        return parsed
+    except Exception as e:
+        if debug:
+            print("[DEBUG] parse_expr exception:")
+            traceback.print_exc()
+        return None
+
+def compute_radius_of_curvature(y_expr, x_val, debug=False):
+    """
+    rho = [1 + (dy/dXsym)^2]^(3/2) / |d^2y/dXsym^2|
+    Evaluate at X_val.
+    """
+    if debug:
+        print(f"[DEBUG] compute_radius_of_curvature: y_expr={y_expr}, X_val={x_val}")
+    try:
+        dy_dX = sp.diff(y_expr, Xsym)
+        d2y_dX2 = sp.diff(dy_dX, Xsym)
+
+        if debug:
+            print(f"[DEBUG]   dy_dX  = {dy_dX}")
+            print(f"[DEBUG]   d2y_dX2= {d2y_dX2}")
+
+        slope_val = dy_dX.subs(Xsym, x_val)
+        second_val = d2y_dX2.subs(Xsym, x_val)
+
+        # Curvature formula
+        rho_expr = ((1 + (dy_dX)**2)**(sp.Rational(3,2))) / sp.Abs(d2y_dX2)
+        rho_val_sym = rho_expr.subs(Xsym, x_val)
+        rho_val = float(rho_val_sym)
+
+        if debug:
+            print(f"[DEBUG]   slope_val={slope_val}, second_val={second_val}, rho_val={rho_val}")
+        return rho_val
+    except Exception as e:
+        if debug:
+            print("[DEBUG] compute_radius_of_curvature exception:")
+            traceback.print_exc()
+        return None
+
+def evaluate_function(expr_str, var_name, var_val, debug=False):
+    """
+    Evaluate 'expr_str' at var_name=var_val, e.g. var_name='Xsym' or 't'.
+    Returns float or None on error.
+    """
+    if expr_str is None or var_val is None:
+        return None
+    parsed_expr = safe_parse_expr(expr_str, debug=debug)
+    if parsed_expr is None:
+        return None
+
+    symbol_to_sub = Xsym if var_name == 'Xsym' else Tsym
+
+    try:
+        evaluated = parsed_expr.subs(symbol_to_sub, var_val)
+        val = float(evaluated)
+        if debug:
+            print(f"[DEBUG] evaluate_function '{expr_str}' at {var_name}={var_val} => {val}")
+        return val
+    except Exception as e:
+        if debug:
+            print("[DEBUG] evaluate_function exception:")
+            traceback.print_exc()
+        return None
+
+def analyze_data(data, debug=False):
+    """
+    Normal–tangential solver that handles 12 features:
+      1) radius of curvature known or from path (Xsym**)
+      2) position, velocity, acceleration
+      3) constant speed => a_t=0
+      4) can compute time = (v - v0)/a_t
+      5) time known or unknown
+      6) total acceleration known => solve for a_t or a_n
+      7) tangential accel can be function of Xsym or t
+      8) velocity can be function of t
+      9) velocity can be function of Xsym
+      10) path y(Xsym)
+      11) x_val => compute curvature
+      12) known resultant accel + angle => a_t, a_n
+    """
+    if debug:
+        print("\n[DEBUG] analyze_data: initial data:")
+        for k,v in data.items():
+            print(f"   {k} = {v}")
+
+    # Extract user data
+    path_str       = data.get("path_str", None)
+    x_val          = data.get("x_val", None)
+    y_val          = data.get("y_val", None)
+    rho_user       = data.get("rho", None)
+    v_num          = data.get("v", None)
+    v0_num         = data.get("v0", None)
+    a_n            = data.get("a_n", None)
+    time_val       = data.get("time", None)
+    a_total        = data.get("a_total", None)
+    angle_a        = data.get("angle_a", None)
+    speed_const    = data.get("speed_constant", False)
+    calc_time_need = data.get("calc_time_needed", False)
+
+    a_t_num = data.get("a_t", None)
+    a_t_str = data.get("a_t_function", None)
+
+    v_func_t = data.get("v_function_time", None)
+    v_func_x = data.get("v_function_pos", None)
+
+    # Parse path if provided
+    y_expr = None
+    if path_str:
+        y_expr = safe_parse_expr(path_str, debug=debug)
+        if debug and y_expr:
+            print(f"[DEBUG] path y_expr = {y_expr}")
+
+    # 1) If rho not provided but path + x_val => compute
+    if rho_user is None and y_expr is not None and x_val is not None:
+        computed_rho = compute_radius_of_curvature(y_expr, x_val, debug=debug)
+        data["rho"] = computed_rho
+        rho_user = computed_rho
+
+    # 3) If speed constant => a_t=0
+    if speed_const:
+        data["a_t"] = 0.0
+        a_t_num = 0.0
+        data.pop("a_t_function", None)
+        if debug:
+            print("[DEBUG] Speed constant => a_t=0")
+
+    # 7) Evaluate a_t if user gave a function
+    if a_t_str is not None:
+        if ('t' in a_t_str) and (time_val is not None):
+            val_a_t = evaluate_function(a_t_str, 't', time_val, debug=debug)
+            if val_a_t is not None:
+                data["a_t"] = val_a_t
+                a_t_num = val_a_t
+        elif ('Xsym' in a_t_str) and (x_val is not None):
+            val_a_t = evaluate_function(a_t_str, 'Xsym', x_val, debug=debug)
+            if val_a_t is not None:
+                data["a_t"] = val_a_t
+                a_t_num = val_a_t
+
+    # 8) velocity as function of time
+    if v_func_t and time_val is not None and v_num is None:
+        v_evaluated = evaluate_function(v_func_t, 't', time_val, debug=debug)
+        if v_evaluated is not None:
+            data["v"] = v_evaluated
+            v_num = v_evaluated
+
+    # 9) velocity as function of Xsym
+    if v_func_x and x_val is not None and v_num is None:
+        v_evaluated = evaluate_function(v_func_x, 'Xsym', x_val, debug=debug)
+        if v_evaluated is not None:
+            data["v"] = v_evaluated
+            v_num = v_evaluated
+
+    # 2) if a_n missing, but we have v and rho => a_n=v^2/rho
+    rho_val = data.get("rho", None)
+    if a_n is None and v_num is not None and rho_val is not None:
+        data["a_n"] = (v_num**2)/rho_val
+        a_n = data["a_n"]
+        if debug:
+            print(f"[DEBUG] Computed a_n={a_n}")
+
+    # 6) total = sqrt(a_t^2 + a_n^2)
+    if a_total is None:
+        if (a_t_num is not None) and (a_n is not None):
+            data["a_total"] = math.sqrt(a_t_num**2 + a_n**2)
+            a_total = data["a_total"]
+            if debug:
+                print(f"[DEBUG] Computed a_total={a_total}")
+    else:
+        # if a_total known, fill a_t or a_n if angle known or partial pythag
+        if angle_a is not None:
+            rad = math.radians(angle_a)
+            if a_t_num is None:
+                data["a_t"] = a_total*math.cos(rad)
+                a_t_num = data["a_t"]
+            if a_n is None:
+                data["a_n"] = a_total*math.sin(rad)
+                a_n = data["a_n"]
+        else:
+            # partial pythag
+            if a_t_num is not None and a_n is None:
+                val = a_total**2 - a_t_num**2
+                if val>=0:
+                    data["a_n"] = math.sqrt(val)
+                    a_n = data["a_n"]
+            elif a_n is not None and a_t_num is None:
+                val = a_total**2 - a_n**2
+                if val>=0:
+                    data["a_t"] = math.sqrt(val)
+                    a_t_num = data["a_t"]
+
+    # 12) angle if not known => angle=atan2(a_n,a_t)
+    if angle_a is None and (a_t_num is not None) and (a_n is not None):
+        angle_deg = math.degrees(math.atan2(a_n, a_t_num))
+        data["angle_a"] = angle_deg
+        if debug:
+            print(f"[DEBUG] Computed angle_a={angle_deg}")
+
+    # 4) if calc_time_need => time=(v-v0)/a_t
+    if calc_time_need:
+        if (v0_num is not None) and (v_num is not None) and (a_t_num is not None) and (a_t_num!=0):
+            data["time_needed"] = (v_num - v0_num)/a_t_num
+            if debug:
+                print(f"[DEBUG] Computed time_needed={data['time_needed']}")
+
+    if debug:
+        print("\n[DEBUG] analyze_data final results:")
+        for k,v in data.items():
+            print(f"   {k} = {v}")
+
+    return data
+
+
+##########################################
+# Test Suite: test_all_combinations
+##########################################
+
+def test_all_combinations(analyze_func, debug=False):
+    """
+    Test 12+ scenario combinations that exercise all
+    the normal–tangential features:
+      1) radius of curvature known vs path
+      2) position, velocity, acceleration
+      3) constant speed
+      4) time calculation
+      5) time known or unknown
+      6) total acceleration known
+      7) tangential accel as function
+      8) velocity as function of time
+      9) velocity as function of position
+      10) path y=f(Xsym)
+      11) x_val => compute curvature
+      12) known resultant accel + angle => a_t, a_n
+    """
+    print("\n=== TESTING ALL MAJOR SCENARIOS & COMBINATIONS ===\n")
+
+    # Scenario A: path => compute rho, speed const => purely normal
+    scenarioA = {
+        "path_str": "Xsym**2/20",
+        "x_val": 10.0,
+        "speed_constant": True,
+        "v": 8.0
+    }
+    print("[Scenario A] path => compute rho, speed const => purely normal.\n")
+    resA = analyze_func(scenarioA, debug=debug)
+
+    # Scenario B: path => compute rho, normal & tangential
+    scenarioB = {
+        "path_str": "Xsym**2/20",
+        "x_val": 10.0,
+        "v": 6.0,
+        "a_t": 2.0
+    }
+    print("\n[Scenario B] path => compute rho, normal+tangential.\n")
+    resB = analyze_func(scenarioB, debug=debug)
+
+    # Scenario C: known rho=25, v=5 => a_total=3 => partial pythag
+    scenarioC = {
+        "rho": 25.0,
+        "v": 5.0,
+        "a_total": 3.0
+    }
+    print("\n[Scenario C] rho=25, v=5 => a_total=3 => deduce a_t.\n")
+    resC = analyze_func(scenarioC, debug=debug)
+
+    # Scenario D: speed const => a_total=4 => purely normal => check v^2/rho
+    scenarioD = {
+        "rho": 40.0,
+        "speed_constant": True,
+        "a_total": 4.0,
+        "v": 12.65
+    }
+    print("\n[Scenario D] speed const => normal=4 => check consistency.\n")
+    resD = analyze_func(scenarioD, debug=debug)
+
+    # Scenario E: time calc => (v - v0)/a_t
+    scenarioE = {
+        "calc_time_needed": True,
+        "v0": 0.0,
+        "v": 10.0,
+        "a_t": 2.0
+    }
+    print("\n[Scenario E] time => (10 - 0)/2=5.\n")
+    resE = analyze_func(scenarioE, debug=debug)
+
+    # Scenario F: a_t(t)=2*t => time=3 => a_t=6 => normal from v=8,rho=50
+    scenarioF = {
+        "time": 3.0,
+        "a_t_function": "2*t",
+        "v": 8.0,
+        "rho": 50.0
+    }
+    print("\n[Scenario F] a_t(t)=2*t => a_t=6 at t=3, plus normal from v,rho.\n")
+    resF = analyze_func(scenarioF, debug=debug)
+
+    # Scenario G: v(t)=2*t+5 => time=4 => v=13
+    scenarioG = {
+        "v_function_time": "2*t + 5",
+        "time": 4.0
+    }
+    print("\n[Scenario G] v(t)=2*t+5 => time=4 => v=13.\n")
+    resG = analyze_func(scenarioG, debug=debug)
+
+    # Scenario H: v(Xsym)=3*Xsym => x_val=4 => v=12
+    scenarioH = {
+        "v_function_pos": "3*Xsym",
+        "x_val": 4.0
+    }
+    print("\n[Scenario H] v(Xsym)=3*Xsym => x=4 => v=12.\n")
+    resH = analyze_func(scenarioH, debug=debug)
+
+    # Scenario I: total=6, angle=40 => a_t=6*cos(40)=4.60..., a_n=3.86...
+    scenarioI = {
+        "a_total": 6.0,
+        "angle_a": 40.0
+    }
+    print("\n[Scenario I] total=6, angle=40 => solve a_t, a_n.\n")
+    resI = analyze_func(scenarioI, debug=debug)
+
+    # Scenario J: path => Xsym**2/20, x=10 => curvature; a_t(Xsym)=0.1*Xsym => a_t=1 => v=5 => normal
+    scenarioJ = {
+        "path_str": "Xsym**2/20",
+        "x_val": 10.0,
+        "a_t_function": "0.1*Xsym",
+        "v": 5.0
+    }
+    print("\n[Scenario J] path => curvature + a_t(Xsym), etc.\n")
+    resJ = analyze_func(scenarioJ, debug=debug)
+
+    # Scenario K: path => compute curvature & normal, also time => (v-0)/a_t
+    scenarioK = {
+        "path_str": "Xsym**2/20",
+        "x_val": 10.0,
+        "v0": 0.0,
+        "v": 6.0,
+        "a_t": 2.0,
+        "calc_time_needed": True
+    }
+    print("\n[Scenario K] path => curvature + time => (6-0)/2=3.\n")
+    resK = analyze_func(scenarioK, debug=debug)
+
+    # Scenario L: total=4, angle=25 => a_t=3.63..., a_n=1.69...
+    # plus v=7, rho=29 => check partial
+    scenarioL = {
+        "v": 7.0,
+        "a_total": 4.0,
+        "angle_a": 25.0,
+        "rho": 29.0
+    }
+    print("\n[Scenario L] total=4, angle=25 => partial pythag, plus check v^2/rho.\n")
+    resL = analyze_func(scenarioL, debug=debug)
+
+    print("\n=== Finished Testing 12 Scenarios & Combinations. ===")
+
+###############################################
+# MAIN
+###############################################
+def main():
+    # Run all the test scenarios on our analyze_data solver
+    test_all_combinations(analyze_data, debug=True)
+
+if __name__ == "__main__":
+    main()
